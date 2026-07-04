@@ -1,0 +1,2788 @@
+from telethon import TelegramClient, events, types, Button
+import asyncio
+import re
+import time
+from telethon import functions
+import os
+
+api_id = 23942100
+api_hash = '71069afff908bd5ee99a23a65d889237'
+bot_token = '8246426381:AAHhHAE4Bf9UMrrzLGO_jHKgFNUYb0i6Z0k'
+
+session_dir = '/tmp/telethon_sessions_2'
+os.makedirs(session_dir, exist_ok=True)
+session_path = os.path.join(session_dir, 'zedlink')
+
+client = TelegramClient(session_path, api_id, api_hash).start(bot_token=bot_token)
+
+group_lock_status = {}
+group_lock_timers = {}
+group_lock_end_time = {}
+banned_users = {}
+muted_users = {}
+ban_timers = {}
+mute_timers = {}
+bot_admins = {}
+auto_replies = {}
+admin_titles = {}
+admin_reports = {}
+bot_owners = {}
+permission_lock_status = {}
+warning_users = {}
+warning_settings = {}
+report_messages = {}
+user_states = {}
+user_admin_perms = {}
+admin_previous_perms = {}
+report_states = {}
+link_states = {}
+
+async def resolve_user_identifier(identifier, chat_id=None):
+    try:
+        identifier = str(identifier).strip()
+        
+        if identifier.isdigit():
+            user_id = int(identifier)
+            try:
+                await client.get_entity(user_id)
+                return user_id
+            except:
+                return None
+        
+        if identifier.startswith('@'):
+            username = identifier[1:]
+            try:
+                user = await client.get_entity(username)
+                return user.id
+            except:
+                return None
+        
+        if 't.me/' in identifier or 'telegram.me/' in identifier:
+            try:
+                user = await client.get_entity(identifier)
+                return user.id
+            except:
+                return None
+        
+        try:
+            user = await client.get_entity(identifier)
+            return user.id
+        except:
+            return None
+            
+    except:
+        return None
+
+async def get_target_user(event, require_reply=False):
+    target_user = None
+    
+    if event.reply_to_msg_id:
+        reply_msg = await event.get_reply_message()
+        if reply_msg:
+            return reply_msg.sender_id
+    
+    if require_reply:
+        return None
+    
+    parts = event.text.split()
+    for part in parts[1:]:
+        target_user = await resolve_user_identifier(part, event.chat_id)
+        if target_user:
+            return target_user
+    
+    return target_user
+
+async def get_target_user_from_text(text):
+    try:
+        parts = text.split(maxsplit=2)
+        if len(parts) > 1:
+            identifier = parts[1].strip()
+            return await resolve_user_identifier(identifier)
+    except:
+        pass
+    return None
+
+async def is_group_admin(chat_id, user_id):
+    try:
+        participant = await client.get_permissions(chat_id, user_id)
+        return participant.is_admin or participant.is_creator
+    except:
+        return False
+
+async def is_bot_admin(chat_id, user_id):
+    if chat_id in bot_admins and user_id in bot_admins[chat_id]:
+        return True
+    return False
+
+async def is_bot_owner_or_admin(chat_id, user_id):
+    if chat_id in bot_owners and user_id in bot_owners[chat_id]:
+        return True
+    return await is_bot_admin(chat_id, user_id)
+
+async def get_participant_permissions(chat_id, user_id):
+    try:
+        participant = await client(functions.channels.GetParticipantRequest(
+            channel=chat_id,
+            participant=user_id
+        ))
+        return participant
+    except:
+        return None
+
+async def should_delete_message(event):
+    chat_id = event.chat_id
+    user_id = event.sender_id
+    
+    if event.sender_id == (await client.get_me()).id:
+        return False
+    
+    participant = await get_participant_permissions(chat_id, user_id)
+    if participant:
+        if hasattr(participant.participant, 'admin_rights'):
+            if participant.participant.admin_rights:
+                return False
+        
+        if hasattr(participant.participant, 'is_creator') and participant.participant.is_creator:
+            return False
+    
+    if await is_bot_owner_or_admin(chat_id, user_id):
+        return False
+    
+    return True
+
+async def is_owner_or_admin(event):
+    try:
+        if event.is_private:
+            return False
+            
+        chat = await event.get_chat()
+        user_id = event.sender_id
+        
+        if user_id == 565605634:
+            return True
+        
+        if isinstance(chat, types.Chat):
+            if chat.creator:
+                if user_id == chat.creator.id:
+                    return True
+            
+            if event.chat_id in bot_owners and user_id in bot_owners[event.chat_id]:
+                return True
+            
+            if event.chat_id in bot_admins and user_id in bot_admins[event.chat_id]:
+                return True
+            
+            return await is_group_admin(event.chat_id, user_id)
+                
+        elif isinstance(chat, types.Channel):
+            if event.chat_id in bot_owners and user_id in bot_owners[event.chat_id]:
+                return True
+            
+            if event.chat_id in bot_admins and user_id in bot_admins[event.chat_id]:
+                return True
+            
+            participants = await client.get_permissions(chat.id, user_id)
+            return participants.is_admin or participants.is_creator
+                
+    except:
+        pass
+    return False
+
+async def is_bot_owner(event):
+    try:
+        if event.is_private:
+            return False
+            
+        chat = await event.get_chat()
+        user_id = event.sender_id
+        
+        if user_id == 565605634:
+            return True
+        
+        if isinstance(chat, types.Chat):
+            if chat.creator:
+                if user_id == chat.creator.id:
+                    return True
+            
+            if event.chat_id in bot_owners and user_id in bot_owners[event.chat_id]:
+                return True
+                
+        elif isinstance(chat, types.Channel):
+            if event.chat_id in bot_owners and user_id in bot_owners[event.chat_id]:
+                return True
+            
+            participants = await client.get_permissions(chat.id, user_id)
+            return participants.is_creator
+                
+    except:
+        pass
+    return False
+
+async def is_target_owner_or_admin(chat_id, user_id):
+    try:
+        participant = await get_participant_permissions(chat_id, user_id)
+        if participant:
+            p = participant.participant
+            if isinstance(p, types.ChannelParticipantCreator) or (hasattr(p, "is_creator") and p.is_creator):
+                return "مالک گروه"
+            if isinstance(p, types.ChannelParticipantAdmin) or (hasattr(p, "admin_rights") and p.admin_rights):
+                return "ادمین گروه"
+        return "عضو عادی"
+    except:
+        return "عضو عادی"
+
+async def get_actual_group_owner(chat_id):
+    try:
+        admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+        for admin in admins:
+            if admin.bot:
+                continue
+            try:
+                participant = await get_participant_permissions(chat_id, admin.id)
+                if participant and hasattr(participant.participant, 'is_creator') and participant.participant.is_creator:
+                    return admin.id
+            except:
+                continue
+    except:
+        pass
+    return None
+
+async def get_user_name(user_id):
+    try:
+        user = await client.get_entity(user_id)
+        return f"{user.first_name or ''} {user.last_name or ''}".strip() or "کاربر"
+    except:
+        return "کاربر"
+
+async def get_user_mention(user_id):
+    try:
+        user = await client.get_entity(user_id)
+        return f"[{user.first_name or 'کاربر'}](tg://user?id={user.id})"
+    except:
+        return f"[کاربر](tg://user?id={user_id})"
+
+async def send_admin_report(chat_id, report_text):
+    if chat_id in admin_reports and admin_reports[chat_id]:
+        await client.send_message(chat_id, report_text)
+
+def parse_duration(text):
+    text = text.replace('ساعت', 'hour').replace('دقیقه', 'minute').replace('ثانیه', 'second').replace('روز', 'day')
+    
+    day_match = re.search(r'(\d+)\s*day', text)
+    hour_match = re.search(r'(\d+)\s*hour', text)
+    minute_match = re.search(r'(\d+)\s*minute', text)
+    second_match = re.search(r'(\d+)\s*second', text)
+    
+    seconds = 0
+    if day_match:
+        seconds += int(day_match.group(1)) * 86400
+    if hour_match:
+        seconds += int(hour_match.group(1)) * 3600
+    if minute_match:
+        seconds += int(minute_match.group(1)) * 60
+    if second_match:
+        seconds += int(second_match.group(1))
+    
+    return seconds
+
+def format_time(seconds):
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} روز")
+    if hours > 0:
+        parts.append(f"{hours} ساعت")
+    if minutes > 0:
+        parts.append(f"{minutes} دقیقه")
+    if secs > 0:
+        parts.append(f"{secs} ثانیه")
+    
+    return "، ".join(parts)
+
+async def unlock_after_duration(chat_id, duration_seconds):
+    await asyncio.sleep(duration_seconds)
+    group_lock_status[chat_id] = False
+    if chat_id in group_lock_timers:
+        del group_lock_timers[chat_id]
+    if chat_id in group_lock_end_time:
+        del group_lock_end_time[chat_id]
+    
+    await client.send_message(chat_id, "**زمان قفل گروه به اتمام رسیده، هم اکنون کاربران میتوانند پیام ارسال کنند.**")
+
+async def unban_after_duration(chat_id, user_id, duration_seconds):
+    await asyncio.sleep(duration_seconds)
+    if chat_id in banned_users and user_id in banned_users[chat_id]:
+        try:
+            await client.edit_permissions(chat_id, user_id, view_messages=True)
+            del banned_users[chat_id][user_id]
+        except:
+            pass
+
+async def unmute_after_duration(chat_id, user_id, duration_seconds):
+    await asyncio.sleep(duration_seconds)
+    if chat_id in muted_users and user_id in muted_users[chat_id]:
+        try:
+            await client.edit_permissions(chat_id, user_id, send_messages=True)
+            del muted_users[chat_id][user_id]
+        except:
+            pass
+
+def get_permissions_text(perms):
+    permissions = []
+    if perms.get('change_info', False):
+        permissions.append('تغییر اطلاعات گروه')
+    if perms.get('delete_messages', False):
+        permissions.append('حذف پیام')
+    if perms.get('ban_users', False):
+        permissions.append('بن کاربران')
+    if perms.get('invite_users', False):
+        permissions.append('اد ممبر')
+    if perms.get('pin_messages', False):
+        permissions.append('پین')
+    if perms.get('manage_call', False):
+        permissions.append('مدیریت ویسکال')
+    if perms.get('post_stories', False):
+        permissions.append('مدیریت استوری ها')
+    if perms.get('add_admins', False):
+        permissions.append('افزودن ادمین')
+    if perms.get('anonymous', False):
+        permissions.append('ناشناس ماندن')
+    
+    if not permissions:
+        return 'هیچ دسترسی'
+    return '، '.join(permissions)
+
+async def handle_warning_action(chat_id, user_id, warnings_count):
+    if chat_id not in warning_settings:
+        return
+    
+    setting = warning_settings[chat_id]
+    
+    if warnings_count >= 3:
+        user_mention = await get_user_mention(user_id)
+        warning_message = f'**کاربر {user_mention} 3 اخطار کامل دریافت کرد!**\n'
+        
+        if setting == 'بن':
+            try:
+                await client.edit_permissions(chat_id, user_id, view_messages=False)
+                if chat_id not in banned_users:
+                    banned_users[chat_id] = {}
+                banned_users[chat_id][user_id] = (await client.get_me()).id
+                warning_message += '**اقدام ربات** : کاربر مسدود شد.'
+            except:
+                warning_message += '**اقدام ربات** : کاربر مسدود شد.'
+        
+        elif setting == 'سکوت':
+            try:
+                await client.edit_permissions(chat_id, user_id, send_messages=False)
+                if chat_id not in muted_users:
+                    muted_users[chat_id] = {}
+                muted_users[chat_id][user_id] = (await client.get_me()).id
+                warning_message += '**اقدام ربات** : کاربر سکوت شد.'
+            except:
+                warning_message += '**اقدام ربات** : کاربر سکوت شد.'
+        
+        elif setting == 'زماندار':
+            try:
+                duration = 300
+                await client.edit_permissions(chat_id, user_id, send_messages=False)
+                if chat_id not in muted_users:
+                    muted_users[chat_id] = {}
+                muted_users[chat_id][user_id] = (await client.get_me()).id
+                
+                task = asyncio.create_task(unmute_after_duration(chat_id, user_id, duration))
+                mute_timers[(chat_id, user_id)] = task
+                
+                warning_message += f'**اقدام ربات** : به مدت 5 دقیقه به لیست سکوت اضافه شد!'
+            except:
+                warning_message += f'**اقدام ربات** : به مدت 5 دقیقه به لیست سکوت اضافه شد!'
+        
+        await client.send_message(chat_id, warning_message)
+
+async def get_group_admins(chat_id):
+    try:
+        admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+        return [admin for admin in admins if not admin.bot]
+    except:
+        return []
+
+async def forward_report_to_admins(chat_id, reported_message, reporter_id, reported_user_id, group_message_id):
+    try:
+        group = await client.get_entity(chat_id)
+        group_title = group.title
+        
+        reporter_mention = await get_user_mention(reporter_id)
+        reported_mention = await get_user_mention(reported_user_id)
+        
+        admins = await get_group_admins(chat_id)
+        
+        for admin in admins:
+            try:
+                await client.send_message(admin.id, f"پیام گزارش شده:")
+                forwarded = await client.forward_messages(admin.id, reported_message, chat_id)
+                
+                report_text = f"گزارش جدید در گروه {group_title}\n\n"
+                report_text += f"گزارش دهنده : {reporter_mention}\n\n"
+                report_text += "گزارش جهت پیگیری فوروارد شد !"
+                
+                buttons = [
+                    [Button.inline("بن", f"report_ban_{chat_id}_{reported_user_id}_{group_message_id}_{forwarded.id}")],
+                    [Button.inline("سکوت", f"report_mute_{chat_id}_{reported_user_id}_{group_message_id}_{forwarded.id}")],
+                    [Button.inline("سکوت زماندار", f"report_tempmute_{chat_id}_{reported_user_id}_{group_message_id}_{forwarded.id}")],
+                    [Button.inline("اخطار", f"report_warn_{chat_id}_{reported_user_id}_{group_message_id}_{forwarded.id}")],
+                    [Button.inline("حذف پیام", f"report_delete_{chat_id}_{reported_user_id}_{group_message_id}_{reported_message.id}")],
+                    [Button.inline("بیخیالش میو خورد", f"report_ignore_{chat_id}_{reported_user_id}_{group_message_id}_{forwarded.id}")]
+                ]
+                
+                await client.send_message(admin.id, report_text, buttons=buttons)
+            except:
+                continue
+                
+    except:
+        pass
+
+async def notify_group_action(chat_id, admin_id, target_user_id, action, reported_message_id=None):
+    try:
+        admin_mention = await get_user_mention(admin_id)
+        target_mention = await get_user_mention(target_user_id)
+        
+        action_text = ""
+        if action == "ban":
+            action_text = "بن"
+        elif action == "mute":
+            action_text = "سکوت"
+        elif action == "tempmute":
+            action_text = "سکوت زماندار"
+        elif action == "warn":
+            action_text = "اخطار"
+        elif action == "delete":
+            action_text = "حذف پیام"
+        elif action == "ignore":
+            action_text = "بیخیالش میو خورد"
+        
+        report_text = f"گزارش {target_mention} در پیوی ادمین ها پیگیری شد !\n\n"
+        report_text += f"ادمین پیگیری کننده : {admin_mention}\n\n"
+        report_text += f"دستور ادمین : {action_text}"
+        
+        await client.send_message(chat_id, report_text)
+                
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^پین$|^pin$'))
+async def pin_message(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    if not event.reply_to_msg_id:
+        await event.reply("**لطفا روی پیامی که میخواهید پین کنید ریپلای کنید!**")
+        return
+    
+    try:
+        await client.pin_message(event.chat_id, event.reply_to_msg_id, notify=False)
+        await event.reply("• **پیام با موفقیت پین شد !**")
+        
+        if event.chat_id in admin_reports and admin_reports[event.chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            report_text = f"**{admin_name} پیامی را پین کرد!**"
+            await send_admin_report(event.chat_id, report_text)
+    except:
+        await event.reply("**خطا در پین کردن پیام!**")
+
+@client.on(events.NewMessage(pattern=r'^حذف پین$|^unpin$'))
+async def unpin_message(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    if not event.reply_to_msg_id:
+        await event.reply("**لطفا روی پیامی که میخواهید از پین خارج کنید ریپلای کنید!**")
+        return
+    
+    try:
+        await client.unpin_message(event.chat_id, event.reply_to_msg_id)
+        await event.reply("• **پیام با موفقیت از پین خارج شد !**")
+        
+        if event.chat_id in admin_reports and admin_reports[event.chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            report_text = f"**{admin_name} پیامی را از پین خارج کرد!**"
+            await send_admin_report(event.chat_id, report_text)
+    except:
+        await event.reply("**خطا در حذف پین پیام!**")
+
+async def get_group_info(chat_id):
+    try:
+        chat = await client.get_entity(chat_id)
+        
+        group_title = chat.title
+        members_count = chat.participants_count if hasattr(chat, 'participants_count') else 0
+        
+        try:
+            description = chat.about or "بدون توضیح"
+        except:
+            description = "بدون توضیح"
+        
+        return {
+            'title': group_title,
+            'members_count': members_count,
+            'description': description,
+            'id': chat_id
+        }
+    except:
+        return None
+
+async def create_invite_link(chat_id, member_limit=None, request_needed=False):
+    try:
+        if member_limit:
+            result = await client(functions.messages.ExportChatInviteRequest(
+                peer=chat_id,
+                expire_date=None,
+                usage_limit=member_limit,
+                request_needed=request_needed
+            ))
+        else:
+            result = await client(functions.messages.ExportChatInviteRequest(
+                peer=chat_id,
+                expire_date=None,
+                usage_limit=None,
+                request_needed=request_needed
+            ))
+        
+        if hasattr(result, 'link'):
+            return result.link
+        return None
+    except:
+        return None
+
+async def revoke_invite_link(chat_id, link):
+    try:
+        await client(functions.messages.DeleteExportedChatInviteRequest(
+            peer=chat_id,
+            link=link
+        ))
+        return True
+    except:
+        return False
+
+@client.on(events.NewMessage(pattern=r'^لینک$|^link$'))
+async def link_menu(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    group_info = await get_group_info(chat_id)
+    if not group_info:
+        await event.reply("**خطا در دریافت اطلاعات گروه!**")
+        return
+    
+    buttons = [
+        [Button.inline("• ساخت لینک عادی", "create_normal_link")],
+        [Button.inline("• لینک محدودیت اعضا", "create_member_limit_link")],
+        [Button.inline("• لینک درخواستی", "create_request_link")],
+        [Button.inline("• لینک عکسدار", "create_photo_link")],
+        [Button.inline("• بستن", "close_link_menu")]
+    ]
+    
+    await event.reply(
+        f"**منوی لینک گروه**\n\n"
+        f"• **اسم گروه** : {group_info['title']}\n"
+        f"• **تعداد اعضا** : {group_info['members_count']}\n"
+        f"• **شناسه گروه** : `{chat_id}`\n\n"
+        f"**لطفا از منو زیر انتخاب کنید:**",
+        buttons=buttons
+    )
+
+@client.on(events.CallbackQuery(pattern=r'create_normal_link'))
+async def handle_normal_link(event):
+    chat_id = event.chat_id
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    group_info = await get_group_info(chat_id)
+    if not group_info:
+        await event.answer("خطا در دریافت اطلاعات گروه!")
+        return
+    
+    invite_link = await create_invite_link(chat_id)
+    if not invite_link:
+        await event.edit("**خطا در ساخت لینک!**")
+        return
+    
+    buttons = [
+        [Button.url("• اشتراک گذاری لینک", f"https://t.me/share/url?url={invite_link}")],
+        [Button.inline("• ابطال لینک", f"revoke_link_{chat_id}_{invite_link.split('/')[-1]}")],
+        [Button.inline("• بازگشت", "back_to_link_menu")]
+    ]
+    
+    await event.edit(
+        f"• **لینک عادی ساخته شد !**\n\n"
+        f"• **اسم گروه** : {group_info['title']}\n"
+        f"• **تعداد اعضا** : {group_info['members_count']}\n"
+        f"• **شناسه گروه** : `{chat_id}`\n"
+        f"• **لینک گروه** : {invite_link}\n\n"
+        f"**لینک عادی ساخته شد، میتوانید با دکمه زیر آن را اشتراک گذاری کنید:**",
+        buttons=buttons
+    )
+    
+    link_states[(chat_id, event.sender_id)] = {
+        'link': invite_link,
+        'type': 'normal'
+    }
+
+@client.on(events.CallbackQuery(pattern=r'create_member_limit_link'))
+async def handle_member_limit_link(event):
+    chat_id = event.chat_id
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    await event.edit("**تعداد اعضایی که میخواهید از این لینک استفاده کنند را ارسال کنید**\n\n(عدد بین 1 تا 1000)")
+    
+    link_states[(chat_id, event.sender_id)] = {
+        'state': 'waiting_member_limit',
+        'type': 'member_limit'
+    }
+
+@client.on(events.CallbackQuery(pattern=r'create_request_link'))
+async def handle_request_link(event):
+    chat_id = event.chat_id
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    group_info = await get_group_info(chat_id)
+    if not group_info:
+        await event.answer("خطا در دریافت اطلاعات گروه!")
+        return
+    
+    invite_link = await create_invite_link(chat_id, request_needed=True)
+    if not invite_link:
+        await event.edit("**خطا در ساخت لینک!**")
+        return
+    
+    buttons = [
+        [Button.inline("• ابطال لینک", f"revoke_link_{chat_id}_{invite_link.split('/')[-1]}")],
+        [Button.inline("• بازگشت", "back_to_link_menu")]
+    ]
+    
+    await event.edit(
+        f"• **لینک درخواستی ساخته شد !**\n\n"
+        f"• **اسم گروه** : {group_info['title']}\n"
+        f"• **تعداد اعضا** : {group_info['members_count']}\n"
+        f"• **شناسه گروه** : `{chat_id}`\n"
+        f"• **لینک درخواستی** : {invite_link}\n\n"
+        f"**توجه کنید این لینک لینک درخواستی است و کاربر برای جوین شدن باید درخواست بدهد:**",
+        buttons=buttons
+    )
+    
+    link_states[(chat_id, event.sender_id)] = {
+        'link': invite_link,
+        'type': 'request'
+    }
+
+@client.on(events.CallbackQuery(pattern=r'create_photo_link'))
+async def handle_photo_link(event):
+    chat_id = event.chat_id
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    group_info = await get_group_info(chat_id)
+    if not group_info:
+        await event.answer("خطا در دریافت اطلاعات گروه!")
+        return
+    
+    invite_link = await create_invite_link(chat_id)
+    if not invite_link:
+        await event.edit("**خطا در ساخت لینک!**")
+        return
+    
+    try:
+        chat = await client.get_entity(chat_id)
+        
+        photo_data = None
+        if hasattr(chat, 'photo'):
+            try:
+                photo_data = await client.download_media(chat.photo)
+            except:
+                pass
+        
+        caption = (
+            f"• **اسم گروه** : {group_info['title']}\n"
+            f"• **تعداد اعضا** : {group_info['members_count']}\n"
+            f"• **بیو گروه** : {group_info['description'][:100]}{'...' if len(group_info['description']) > 100 else ''}\n"
+            f"• **لینک گروه** : {invite_link}"
+        )
+        
+        buttons = [
+            [Button.url("• اشتراک گذاری لینک", f"https://t.me/share/url?url={invite_link}")],
+            [Button.inline("• ابطال لینک", f"revoke_link_{chat_id}_{invite_link.split('/')[-1]}")],
+            [Button.inline("• بازگشت", "back_to_link_menu")]
+        ]
+        
+        if photo_data and os.path.exists(photo_data):
+            await client.send_file(
+                chat_id,
+                photo_data,
+                caption=caption,
+                buttons=buttons,
+                reply_to=event.message_id
+            )
+            os.remove(photo_data)
+        else:
+            await event.edit(
+                f"• **لینک عکسدار ساخته شد !**\n\n{caption}\n\n"
+                f"**لینک عکسدار ساخته شد:**",
+                buttons=buttons
+            )
+        
+        link_states[(chat_id, event.sender_id)] = {
+            'link': invite_link,
+            'type': 'photo'
+        }
+        
+    except:
+        await event.edit("**خطا در ایجاد لینک عکسدار!**")
+
+@client.on(events.CallbackQuery(pattern=r'revoke_link_'))
+async def handle_revoke_link(event):
+    data = event.data.decode('utf-8')
+    parts = data.split('_')
+    chat_id = int(parts[2])
+    link_suffix = parts[3]
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    try:
+        invite_link = f"https://t.me/+{link_suffix}"
+        success = await revoke_invite_link(chat_id, invite_link)
+        
+        if success:
+            await event.edit("• **لینک با موفقیت ابطال شد !**")
+            
+            key = (chat_id, event.sender_id)
+            if key in link_states:
+                del link_states[key]
+        else:
+            await event.edit("**محدودیت در باطل سازی لینک")
+    except:
+        await event.edit("در باطل سازی لینک چیزشد")
+
+@client.on(events.CallbackQuery(pattern=r'back_to_link_menu'))
+async def handle_back_to_link_menu(event):
+    chat_id = event.chat_id
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    group_info = await get_group_info(chat_id)
+    if not group_info:
+        await event.answer("خب چه کنم")
+        return
+    
+    buttons = [
+        [Button.inline("• ساخت لینک عادی", "create_normal_link")],
+        [Button.inline("• لینک محدودیت اعضا", "create_member_limit_link")],
+        [Button.inline("• لینک درخواستی", "create_request_link")],
+        [Button.inline("• لینک عکسدار", "create_photo_link")],
+        [Button.inline("• بستن", "close_link_menu")]
+    ]
+    
+    await event.edit(
+        f"**منوی لینک گروه**\n\n"
+        f"• **اسم گروه** : {group_info['title']}\n"
+        f"• **تعداد اعضا** : {group_info['members_count']}\n"
+        f"• **شناسه گروه** : `{chat_id}`\n\n"
+        f"**لطفا از منو زیر انتخاب کنید:**",
+        buttons=buttons
+    )
+
+@client.on(events.CallbackQuery(pattern=r'close_link_menu'))
+async def handle_close_link_menu(event):
+    await event.edit("• **منو لینک با موفقیت بسته شد !**")
+
+@client.on(events.NewMessage)
+async def handle_member_limit_input(event):
+    if event.is_private:
+        return
+    
+    chat_id = event.chat_id
+    user_id = event.sender_id
+    
+    key = (chat_id, user_id)
+    
+    if key in link_states and link_states[key].get('state') == 'waiting_member_limit':
+        text = event.text.strip()
+        
+        if text.isdigit():
+            member_limit = int(text)
+            
+            if 1 <= member_limit <= 1000:
+                group_info = await get_group_info(chat_id)
+                if not group_info:
+                    return
+                
+                invite_link = await create_invite_link(chat_id, member_limit=member_limit)
+                if not invite_link:
+                    await event.reply("**خطا در ساخت لینک!**")
+                    return
+                
+                buttons = [
+                    [Button.url("• اشتراک گذاری لینک", f"https://t.me/share/url?url={invite_link}")],
+                    [Button.inline("• ابطال لینک", f"revoke_link_{chat_id}_{invite_link.split('/')[-1]}")],
+                    [Button.inline("• بازگشت", "back_to_link_menu")]
+                ]
+                
+                await event.reply(
+                    f"• **لینک محدودیت اعضا ساخته شد !**\n\n"
+                    f"• **اسم گروه** : {group_info['title']}\n"
+                    f"• **تعداد اعضا** : {group_info['members_count']}\n"
+                    f"• **شناسه گروه** : `{chat_id}`\n"
+                    f"• **لینک گروه** : {invite_link}\n"
+                    f"• **محدودیت اعضا** : {member_limit} نفر\n\n"
+                    f"**لینک محدودیت اعضا ساخته شد، فقط {member_limit} نفر میتوانند از این لینک استفاده کنند:**",
+                    buttons=buttons
+                )
+                
+                link_states[key] = {
+                    'link': invite_link,
+                    'type': 'member_limit',
+                    'member_limit': member_limit
+                }
+            else:
+                await event.reply("**لطفا عددی بین 1 تا 1000 وارد کنید!**")
+        else:
+            await event.reply("**لطفا فقط عدد وارد کنید!**")
+
+@client.on(events.NewMessage(pattern=r'^گزارش$|^report$'))
+async def report_message(event):
+    if event.is_private:
+        return
+    
+    if not event.reply_to_msg_id:
+        return
+    
+    if await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    reporter_id = event.sender_id
+    
+    try:
+        reply_msg = await event.get_reply_message()
+        if not reply_msg:
+            return
+        
+        reported_user_id = reply_msg.sender_id
+        
+        confirmation_msg = await event.reply("گزارش شما برای مدیران ربات ارسال شد !")
+        
+        buttons = [
+            [Button.inline("بررسی شد", f"group_reviewed_{confirmation_msg.id}_{reported_user_id}")],
+            [Button.inline("حذف", f"group_delete_{confirmation_msg.id}_{reported_user_id}")]
+        ]
+        
+        await confirmation_msg.edit(confirmation_msg.text, buttons=buttons)
+        
+        await forward_report_to_admins(chat_id, reply_msg, reporter_id, reported_user_id, confirmation_msg.id)
+            
+    except:
+        pass
+
+@client.on(events.CallbackQuery(pattern=r'group_(reviewed|delete)_'))
+async def handle_group_report_buttons(event):
+    data = event.data.decode('utf-8')
+    chat_id = event.chat_id
+    user_id = event.sender_id
+    
+    if not await is_owner_or_admin(event):
+        await event.answer()
+        return
+    
+    parts = data.split('_')
+    action = parts[1]
+    message_id = int(parts[2])
+    reported_user_id = int(parts[3])
+    
+    if action == "reviewed":
+        await event.edit(f"بررسی شد")
+    elif action == "delete":
+        try:
+            await client.delete_messages(chat_id, message_id)
+        except:
+            pass
+    
+    await event.answer()
+
+@client.on(events.CallbackQuery(pattern=r'report_(ban|mute|tempmute|warn|delete|ignore)_'))
+async def handle_report_action(event):
+    data = event.data.decode('utf-8')
+    chat_id = event.sender_id
+    user_id = event.sender_id
+    
+    parts = data.split('_')
+    action = parts[1]
+    target_chat_id = int(parts[2])
+    target_user_id = int(parts[3])
+    group_message_id = int(parts[4])
+    forwarded_message_id = int(parts[5]) if len(parts) > 5 else None
+    
+    if action == "tempmute":
+        await event.edit("چقدر میخواهید کاربر فلان سکوت زماندار شود؟\n(به عنوان مثال 30 ثانیه یا 30 دقیقه یا 30 ساعت یا 30 روز میتوانید ارسال کنید)")
+        
+        report_states[(user_id, target_chat_id, target_user_id, group_message_id)] = {
+            'action': 'tempmute',
+            'forwarded_message_id': forwarded_message_id
+        }
+        return
+    
+    try:
+        if action == "ban":
+            if target_chat_id not in banned_users:
+                banned_users[target_chat_id] = {}
+            
+            banned_users[target_chat_id][target_user_id] = user_id
+            await client.edit_permissions(target_chat_id, target_user_id, view_messages=False)
+            
+            buttons = [[Button.inline("حذف بن", f"unban_{target_chat_id}_{target_user_id}")]]
+            await event.edit("بن", buttons=buttons)
+            
+        elif action == "mute":
+            if target_chat_id not in muted_users:
+                muted_users[target_chat_id] = {}
+            
+            muted_users[target_chat_id][target_user_id] = user_id
+            await client.edit_permissions(target_chat_id, target_user_id, send_messages=False)
+            
+            await event.edit("سکوت")
+            
+        elif action == "warn":
+            if target_chat_id not in warning_users:
+                warning_users[target_chat_id] = {}
+            
+            if target_user_id not in warning_users[target_chat_id]:
+                warning_users[target_chat_id][target_user_id] = 0
+            
+            warning_users[target_chat_id][target_user_id] += 1
+            warnings_count = warning_users[target_chat_id][target_user_id]
+            
+            user_mention = await get_user_mention(target_user_id)
+            await event.edit(f"اخطار به {user_mention} (تعداد اخطارها: {warnings_count}/3)")
+            
+            if warnings_count >= 3:
+                await handle_warning_action(target_chat_id, target_user_id, warnings_count)
+                warning_users[target_chat_id][target_user_id] = 0
+                
+        elif action == "delete":
+            try:
+                await client.delete_messages(target_chat_id, forwarded_message_id)
+                await event.edit("حذف پیام")
+            except:
+                await event.edit("حذف پیام")
+                
+        elif action == "ignore":
+            admin_mention = await get_user_mention(user_id)
+            target_mention = await get_user_mention(target_user_id)
+            await event.edit(f"ربات به دستور ادمین {admin_mention} هیچ اقدامی روی کاربر {target_mention} انجام نمیدهد (کاربر میوخورد)")
+        
+        await notify_group_action(target_chat_id, user_id, target_user_id, action, forwarded_message_id)
+        
+    except:
+        await event.answer()
+
+@client.on(events.CallbackQuery(pattern=r'unban_'))
+async def handle_unban_report(event):
+    data = event.data.decode('utf-8')
+    parts = data.split('_')
+    target_chat_id = int(parts[1])
+    target_user_id = int(parts[2])
+    user_id = event.sender_id
+    
+    try:
+        if target_chat_id in banned_users and target_user_id in banned_users[target_chat_id]:
+            await client.edit_permissions(target_chat_id, target_user_id, view_messages=True)
+            del banned_users[target_chat_id][target_user_id]
+            
+            timer_key = (target_chat_id, target_user_id)
+            if timer_key in ban_timers:
+                ban_timers[timer_key].cancel()
+                del ban_timers[timer_key]
+            
+            await event.edit("حذف بن")
+            
+    except:
+        await event.answer()
+
+@client.on(events.NewMessage)
+async def handle_temp_mute_duration(event):
+    if event.is_private:
+        user_id = event.sender_id
+        
+        for key in list(report_states.keys()):
+            if key[0] == user_id:
+                state = report_states[key]
+                target_chat_id = key[1]
+                target_user_id = key[2]
+                group_message_id = key[3]
+                
+                if state['action'] == 'tempmute':
+                    text = event.text.strip()
+                    
+                    duration_seconds = parse_duration(text)
+                    if duration_seconds > 0:
+                        try:
+                            if target_chat_id not in muted_users:
+                                muted_users[target_chat_id] = {}
+                            
+                            muted_users[target_chat_id][target_user_id] = user_id
+                            await client.edit_permissions(target_chat_id, target_user_id, send_messages=False)
+                            
+                            task = asyncio.create_task(unmute_after_duration(target_chat_id, target_user_id, duration_seconds))
+                            mute_timers[(target_chat_id, target_user_id)] = task
+                            
+                            await notify_group_action(target_chat_id, user_id, target_user_id, "tempmute")
+                            
+                        except:
+                            pass
+                    
+                    del report_states[key]
+                    break
+
+@client.on(events.NewMessage(pattern=r'^click (\d+)$'))
+async def click_command(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    try:
+        parts = event.text.split()
+        if len(parts) < 2:
+            return
+        
+        target_user_id = int(parts[1])
+        
+        user_mention = await get_user_mention(target_user_id)
+        
+        buttons = [[Button.inline("میو", f"open_pm_{target_user_id}")]]
+        
+        await event.reply(f"برای بازکردن پیوی کاربر {user_mention} کلمه میو را بفشارید !", buttons=buttons)
+        
+    except:
+        pass
+
+@client.on(events.CallbackQuery(pattern=r'open_pm_'))
+async def handle_open_pm(event):
+    data = event.data.decode('utf-8')
+    target_user_id = int(data.split('_')[2])
+    
+    try:
+        user = await client.get_entity(target_user_id)
+        
+        try:
+            await client.send_message(
+                event.sender_id,
+                f"tg://openmessage?user_id={target_user_id}"
+            )
+        except:
+            pass
+            
+    except:
+        pass
+    
+    await event.answer()
+
+@client.on(events.NewMessage(pattern=r'^ban$|^ban @|^ban \d+'))
+async def ban_user_english(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    if await is_bot_owner_or_admin(chat_id, target_user):
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مدیر ربات است و نمیتوان بن کرد!**")
+        return
+    
+    if chat_id not in banned_users:
+        banned_users[chat_id] = {}
+    
+    if target_user in banned_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مسدود است!**")
+        return
+    
+    try:
+        await client.edit_permissions(chat_id, target_user, view_messages=False)
+        banned_users[chat_id][target_user] = event.sender_id
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} از گروه مسدود شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را از گروه بن کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^unban$|^unban @|^unban \d+'))
+async def unban_user_english(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in banned_users or target_user not in banned_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مسدود نیست!**")
+        return
+    
+    try:
+        await client.edit_permissions(chat_id, target_user, view_messages=True)
+        del banned_users[chat_id][target_user]
+        
+        timer_key = (chat_id, target_user)
+        if timer_key in ban_timers:
+            ban_timers[timer_key].cancel()
+            del ban_timers[timer_key]
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} از مسدودیت خارج شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را از بن خارج کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^اخطار$|^اخطار @|^اخطار \d+'))
+async def warn_user(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    if await is_bot_owner_or_admin(chat_id, target_user):
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مدیر ربات است و نمیتوان اخطار داد!**")
+        return
+    
+    if chat_id not in warning_users:
+        warning_users[chat_id] = {}
+    
+    if target_user not in warning_users[chat_id]:
+        warning_users[chat_id][target_user] = 0
+    
+    warning_users[chat_id][target_user] += 1
+    warnings_count = warning_users[chat_id][target_user]
+    
+    user_mention = await get_user_mention(target_user)
+    admin_mention = await get_user_mention(event.sender_id)
+    
+    warning_msg = f"**کاربر {user_mention} شما یک اخطار دریافت کردید.**\n"
+    warning_msg += f"**تعداد اخطار های شما** : ({warnings_count}/3)\n"
+    warning_msg += f"**اخطار دهنده** : {admin_mention}"
+    
+    await event.reply(warning_msg)
+    
+    if warnings_count >= 3:
+        await handle_warning_action(chat_id, target_user, warnings_count)
+        warning_users[chat_id][target_user] = 0
+
+@client.on(events.NewMessage(pattern=r'^حذف اخطار$|^حذف اخطار @|^حذف اخطار \d+'))
+async def remove_warning(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in warning_users or target_user not in warning_users[chat_id] or warning_users[chat_id][target_user] == 0:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**کاربر {user_mention} اخطاری ندارد!**")
+        return
+    
+    old_warnings = warning_users[chat_id][target_user]
+    warning_users[chat_id][target_user] = max(0, warning_users[chat_id][target_user] - 1)
+    new_warnings = warning_users[chat_id][target_user]
+    
+    user_mention = await get_user_mention(target_user)
+    
+    warning_msg = f"**تعداد یک اخطار از کاربر {user_mention} حذف شد.**\n"
+    warning_msg += f"**اخطارهای کاربر** : ({new_warnings}/3)"
+    
+    await event.reply(warning_msg)
+
+@client.on(events.NewMessage(pattern='^لیست اخطار$'))
+async def list_warnings(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id not in warning_users or not any(warning_users[chat_id].values()):
+        await event.reply("**لیست اخطار خالی است!**")
+        return
+    
+    message = "**لیست اخطارها**\n\n"
+    
+    for i, (user_id, warnings_count) in enumerate(warning_users[chat_id].items(), 1):
+        if warnings_count > 0:
+            user_mention = await get_user_mention(user_id)
+            message += f"**{i} -** {user_mention} : ({warnings_count}/3) اخطار\n"
+    
+    if chat_id in warning_settings:
+        setting_text = warning_settings[chat_id]
+        if setting_text == 'زماندار':
+            setting_text = 'سکوت زماندار (5 دقیقه)'
+        message += f"\n**تنظیم فعلی اخطار** : {setting_text}"
+    
+    await event.reply(message)
+
+@client.on(events.NewMessage(pattern='^پاکسازی لیست اخطار$'))
+async def clear_warning_list(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id in warning_users:
+        warning_users[chat_id] = {}
+    
+    await event.reply("**لیست اخطار با موفقیت پاکسازی شد!**")
+
+@client.on(events.NewMessage(pattern=r'^تنظیم وضعیت اخطار (بن|سکوت|زماندار)$'))
+async def set_warning_status(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    match = re.match(r'^تنظیم وضعیت اخطار (بن|سکوت|زماندار)$', event.text)
+    
+    if match:
+        status = match.group(1)
+        warning_settings[chat_id] = status
+        
+        status_text = status
+        if status == 'زماندار':
+            status_text = 'سکوت زماندار (5 دقیقه)'
+        
+        await event.reply(f"**وضعیت اخطار به {status_text} تنظیم شد!**")
+
+@client.on(events.NewMessage(pattern='^حذف$'))
+async def delete_single_message(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    if event.reply_to_msg_id:
+        try:
+            await client.delete_messages(event.chat_id, [event.id, event.reply_to_msg_id])
+        except:
+            pass
+
+@client.on(events.NewMessage(pattern=r'^حذف (\d+)$'))
+async def delete_multiple_messages(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    try:
+        text = event.text
+        number = int(text.split()[1])
+        
+        if number <= 0 or number > 100:
+            return
+        
+        try:
+            await client.delete_messages(event.chat_id, event.id)
+        except:
+            pass
+        
+        messages_to_delete = []
+        count = 0
+        
+        async for message in client.iter_messages(event.chat_id, limit=number + 10):
+            if message.sender_id == (await client.get_me()).id:
+                continue
+            
+            if count >= number:
+                break
+            
+            if await should_delete_message(message):
+                messages_to_delete.append(message.id)
+                count += 1
+        
+        if messages_to_delete:
+            await client.delete_messages(event.chat_id, messages_to_delete)
+        
+        if count > 0:
+            result_msg = await client.send_message(event.chat_id, f"**تعداد {count} پیام با موفقیت حذف شد!**")
+            
+            await asyncio.sleep(3)
+            await client.delete_messages(event.chat_id, result_msg.id)
+        
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern='^قفل گروه$'))
+async def lock_group(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    group_lock_status[chat_id] = True
+    await event.reply("**قفل گروه با موفقیت فعال شد!**")
+    
+    if chat_id in admin_reports and admin_reports[chat_id]:
+        admin_name = await get_user_name(event.sender_id)
+        report_text = f"**{admin_name} قفل گروه را فعال کرد!**"
+        await send_admin_report(chat_id, report_text)
+
+@client.on(events.NewMessage(pattern=r'^قفل گروه (\d+) (ساعت|دقیقه|ثانیه)$'))
+async def lock_group_with_duration(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    match = re.match(r'^قفل گروه (\d+) (ساعت|دقیقه|ثانیه)$', event.text)
+    
+    if match:
+        number = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit == 'ساعت':
+            duration_seconds = number * 3600
+        elif unit == 'دقیقه':
+            duration_seconds = number * 60
+        else:
+            duration_seconds = number
+        
+        group_lock_status[chat_id] = True
+        
+        end_time = time.time() + duration_seconds
+        group_lock_end_time[chat_id] = end_time
+        
+        if chat_id in group_lock_timers:
+            group_lock_timers[chat_id].cancel()
+        
+        task = asyncio.create_task(unlock_after_duration(chat_id, duration_seconds))
+        group_lock_timers[chat_id] = task
+        
+        duration_text = format_time(duration_seconds)
+        await event.reply(f"**قفل گروه به مدت {duration_text} فعال شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            report_text = f"**{admin_name} قفل گروه را به مدت {duration_text} فعال کرد!**"
+            await send_admin_report(chat_id, report_text)
+
+@client.on(events.NewMessage(pattern='^بازکردن گروه$'))
+async def unlock_group(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id in group_lock_timers:
+        group_lock_timers[chat_id].cancel()
+        del group_lock_timers[chat_id]
+    
+    if chat_id in group_lock_end_time:
+        del group_lock_end_time[chat_id]
+    
+    group_lock_status[chat_id] = False
+    await event.reply("**قفل گروه با موفقیت غیرفعال شد!**")
+    
+    if chat_id in admin_reports and admin_reports[chat_id]:
+        admin_name = await get_user_name(event.sender_id)
+        report_text = f"**{admin_name} قفل گروه را غیرفعال کرد!**"
+        await send_admin_report(chat_id, report_text)
+
+@client.on(events.NewMessage(pattern='^قفل پرمیشن$'))
+async def lock_permission(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    try:
+        await client.edit_permissions(
+            chat_id,
+            send_messages=False,
+            send_media=False,
+            send_stickers=False,
+            send_gifs=False,
+            send_games=False,
+            send_inline=False,
+            embed_link_previews=False,
+            send_polls=False,
+            change_info=False,
+            invite_users=False,
+            pin_messages=False
+        )
+        
+        permission_lock_status[chat_id] = True
+        await event.reply("**قفل گروه از طریق بالا فعال شد.**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            report_text = f"**{admin_name} قفل پرمیشن گروه را فعال کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        await event.reply("**قفل گروه از طریق بالا فعال شد.**")
+
+@client.on(events.NewMessage(pattern='^بازکردن پرمیشن$'))
+async def unlock_permission(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    try:
+        await client.edit_permissions(
+            chat_id,
+            send_messages=True,
+            send_media=True,
+            send_stickers=True,
+            send_gifs=True,
+            send_games=False,
+            send_inline=True,
+            embed_link_previews=True,
+            send_polls=True,
+            change_info=True,
+            invite_users=True,
+            pin_messages=True
+        )
+        
+        permission_lock_status[chat_id] = False
+        await event.reply("**پرمیشن های گروه با موفقیت باز شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            report_text = f"**{admin_name} قفل پرمیشن گروه را غیرفعال کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        await event.reply("**پرمیشن های گروه با موفقیت باز شد!**")
+
+@client.on(events.NewMessage(pattern=r'^بن$|^بن @|^بن \d+'))
+async def ban_user(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    if await is_bot_owner_or_admin(chat_id, target_user):
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مدیر ربات است و نمیتوان بن کرد!**")
+        return
+    
+    if chat_id not in banned_users:
+        banned_users[chat_id] = {}
+    
+    if target_user in banned_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مسدود است!**")
+        return
+    
+    try:
+        await client.edit_permissions(chat_id, target_user, view_messages=False)
+        banned_users[chat_id][target_user] = event.sender_id
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} از گروه مسدود شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را از گروه بن کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^بن (\d+) (ساعت|دقیقه|ثانیه)$|^بن @.* (\d+) (ساعت|دقیقه|ثانیه)$'))
+async def ban_user_with_duration(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    if await is_bot_owner_or_admin(chat_id, target_user):
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مدیر ربات است و نمیتوان بن کرد!**")
+        return
+    
+    if chat_id not in banned_users:
+        banned_users[chat_id] = {}
+    
+    if target_user in banned_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مسدود است!**")
+        return
+    
+    match = re.match(r'^بن (\d+) (ساعت|دقیقه|ثانیه)$', event.text)
+    if not match:
+        match = re.match(r'^بن @.* (\d+) (ساعت|دقیقه|ثانیه)$', event.text)
+    
+    if match:
+        number = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit == 'ساعت':
+            duration_seconds = number * 3600
+        elif unit == 'دقیقه':
+            duration_seconds = number * 60
+        else:
+            duration_seconds = number
+        
+        try:
+            await client.edit_permissions(chat_id, target_user, view_messages=False)
+            banned_users[chat_id][target_user] = event.sender_id
+            
+            task = asyncio.create_task(unban_after_duration(chat_id, target_user, duration_seconds))
+            ban_timers[(chat_id, target_user)] = task
+            
+            user_mention = await get_user_mention(target_user)
+            duration_text = format_time(duration_seconds)
+            await event.reply(f"**{user_mention} به مدت {duration_text} مسدود شد!**")
+            
+            if chat_id in admin_reports and admin_reports[chat_id]:
+                admin_name = await get_user_name(event.sender_id)
+                target_name = await get_user_name(target_user)
+                report_text = f"**{admin_name} کاربر {target_name} را به مدت {duration_text} بن کرد!**"
+                await send_admin_report(chat_id, report_text)
+        except:
+            pass
+
+@client.on(events.NewMessage(pattern=r'^حذف بن$|^حذف بن @|^حذف بن \d+'))
+async def unban_user(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in banned_users or target_user not in banned_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مسدود نیست!**")
+        return
+    
+    try:
+        await client.edit_permissions(chat_id, target_user, view_messages=True)
+        del banned_users[chat_id][target_user]
+        
+        timer_key = (chat_id, target_user)
+        if timer_key in ban_timers:
+            ban_timers[timer_key].cancel()
+            del ban_timers[timer_key]
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} از مسدودیت خارج شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را از بن خارج کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern='^لیست بن$'))
+async def ban_list(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id not in banned_users or not banned_users[chat_id]:
+        await event.reply("**لیست بن خالی است!**")
+        return
+    
+    message = "**لیست بن**\n\n"
+    
+    for i, (user_id, banner_id) in enumerate(banned_users[chat_id].items(), 1):
+        user_mention = await get_user_mention(user_id)
+        banner_mention = await get_user_mention(banner_id)
+        message += f"**{i} -** {user_mention} توسط {banner_mention}\n"
+    
+    await event.reply(message)
+
+@client.on(events.NewMessage(pattern='^پاکسازی لیست بن$'))
+async def clear_ban_list(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id in banned_users:
+        for user_id in list(banned_users[chat_id].keys()):
+            try:
+                await client.edit_permissions(chat_id, user_id, view_messages=True)
+            except:
+                pass
+        
+        banned_users[chat_id] = {}
+    
+    await event.reply("**لیست بن با موفقیت پاکسازی شد!**")
+
+@client.on(events.NewMessage(pattern=r'^سکوت$|^سکوت @|^سکوت \d+'))
+async def mute_user(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    if await is_bot_owner_or_admin(chat_id, target_user):
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مدیر ربات است و نمیتوان سکوت کرد!**")
+        return
+    
+    if chat_id not in muted_users:
+        muted_users[chat_id] = {}
+    
+    if target_user in muted_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر سکوت است!**")
+        return
+    
+    try:
+        await client.edit_permissions(chat_id, target_user, send_messages=False)
+        muted_users[chat_id][target_user] = event.sender_id
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} به لیست سکوت اضافه شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را سکوت کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^سکوت (\d+) (ساعت|دقیقه|ثانیه)$|^سکوت @.* (\d+) (ساعت|دقیقه|ثانیه)$'))
+async def mute_user_with_duration(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    if await is_bot_owner_or_admin(chat_id, target_user):
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مدیر ربات است و نمیتوان سکوت کرد!**")
+        return
+    
+    if chat_id not in muted_users:
+        muted_users[chat_id] = {}
+    
+    if target_user in muted_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر سکوت است!**")
+        return
+    
+    match = re.match(r'^سکوت (\d+) (ساعت|دقیقه|ثانیه)$', event.text)
+    if not match:
+        match = re.match(r'^سکوت @.* (\d+) (ساعت|دقیقه|ثانیه)$', event.text)
+    
+    if match:
+        number = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit == 'ساعت':
+            duration_seconds = number * 3600
+        elif unit == 'دقیقه':
+            duration_seconds = number * 60
+        else:
+            duration_seconds = number
+        
+        try:
+            await client.edit_permissions(chat_id, target_user, send_messages=False)
+            muted_users[chat_id][target_user] = event.sender_id
+            
+            task = asyncio.create_task(unmute_after_duration(chat_id, target_user, duration_seconds))
+            mute_timers[(chat_id, target_user)] = task
+            
+            user_mention = await get_user_mention(target_user)
+            duration_text = format_time(duration_seconds)
+            await event.reply(f"**{user_mention} به مدت {duration_text} سکوت شد!**")
+            
+            if chat_id in admin_reports and admin_reports[chat_id]:
+                admin_name = await get_user_name(event.sender_id)
+                target_name = await get_user_name(target_user)
+                report_text = f"**{admin_name} کاربر {target_name} را به مدت {duration_text} سکوت کرد!**"
+                await send_admin_report(chat_id, report_text)
+        except:
+            pass
+
+@client.on(events.NewMessage(pattern=r'^حذف سکوت$|^حذف سکوت @|^حذف سکوت \d+'))
+async def unmute_user(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in muted_users or target_user not in muted_users[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر سکوت نیست!**")
+        return
+    
+    try:
+        await client.edit_permissions(chat_id, target_user, send_messages=True)
+        del muted_users[chat_id][target_user]
+        
+        timer_key = (chat_id, target_user)
+        if timer_key in mute_timers:
+            mute_timers[timer_key].cancel()
+            del mute_timers[timer_key]
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} از سکوت خارج شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را از سکوت خارج کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern='^لیست سکوت$'))
+async def mute_list(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id not in muted_users or not muted_users[chat_id]:
+        await event.reply("**لیست سکوت خالی است!**")
+        return
+    
+    message = "**لیست سکوت**\n\n"
+    
+    for i, (user_id, muter_id) in enumerate(muted_users[chat_id].items(), 1):
+        user_mention = await get_user_mention(user_id)
+        muter_mention = await get_user_mention(muter_id)
+        message += f"**{i} -** {user_mention} توسط {muter_mention}\n"
+    
+    await event.reply(message)
+
+@client.on(events.NewMessage(pattern='^پاکسازی لیست سکوت$'))
+async def clear_mute_list(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id in muted_users:
+        for user_id in list(muted_users[chat_id].keys()):
+            try:
+                await client.edit_permissions(chat_id, user_id, send_messages=True)
+            except:
+                pass
+        
+        muted_users[chat_id] = {}
+    
+    await event.reply("**لیست سکوت با موفقیت پاکسازی شد!**")
+
+@client.on(events.NewMessage(pattern='^بگوو (.*)'))
+async def say_message(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    try:
+        await client.delete_messages(event.chat_id, event.id)
+    except:
+        pass
+    
+    text = event.text.replace('بگوو', '', 1).strip()
+    
+    if text:
+        await client.send_message(event.chat_id, text)
+    elif event.reply_to_msg_id:
+        reply_msg = await event.get_reply_message()
+        if reply_msg:
+            await reply_msg.forward_to(event.chat_id)
+
+@client.on(events.NewMessage(pattern=r'^(ایدی|id)$|^(ایدی|id) @|^(ایدی|id) \d+'))
+async def get_id(event):
+    chat_id = event.chat_id
+    
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        target_user = event.sender_id
+    
+    try:
+        user = await client.get_entity(target_user)
+        
+        has_photo = False
+        photo_data = None
+        
+        try:
+            photos = await client.get_profile_photos(target_user, limit=1)
+            if photos:
+                photo_data = await client.download_media(photos[0])
+                has_photo = True
+        except:
+            pass
+        
+        role = await is_target_owner_or_admin(chat_id, target_user)
+        if target_user == 565605634:
+            role = "سازنده ربات"
+        
+        username = f"@{user.username}" if user.username else "ندارد"
+        user_mention = f"[{user.first_name or 'کاربر'}](tg://user?id={user.id})"
+        
+        caption = f"**اسم کاربر :** {user_mention}\n"
+        caption += f"**شناسه عددی :** `{user.id}`\n"
+        caption += f"**یوزرنیم :** {username}\n"
+        caption += f"**مقام کاربر :** {role}"
+        
+        if has_photo and photo_data:
+            await client.send_file(event.chat_id, photo_data, caption=caption, reply_to=event.reply_to_msg_id if event.reply_to_msg_id else None)
+        else:
+            await event.reply(caption, reply_to=event.reply_to_msg_id if event.reply_to_msg_id else None)
+            
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^تنظیم مدیر$|^تنظیم مدیر @|^تنظیم مدیر \d+'))
+async def set_bot_admin(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in bot_admins:
+        bot_admins[chat_id] = []
+    
+    if target_user in bot_admins[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مدیر ربات است!**")
+        return
+    
+    bot_admins[chat_id].append(target_user)
+    user_mention = await get_user_mention(target_user)
+    await event.reply(f"**{user_mention} به لیست مدیران ربات اضافه شد!**")
+
+@client.on(events.NewMessage(pattern=r'^حذف مدیر$|^حذف مدیر @|^حذف مدیر \d+'))
+async def remove_bot_admin(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in bot_admins or target_user not in bot_admins[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مدیر ربات نیست!**")
+        return
+    
+    bot_admins[chat_id].remove(target_user)
+    user_mention = await get_user_mention(target_user)
+    await event.reply(f"**{user_mention} از لیست مدیران ربات حذف شد!**")
+
+@client.on(events.NewMessage(pattern='^لیست مدیران$'))
+async def list_bot_admins(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id not in bot_admins or not bot_admins[chat_id]:
+        await event.reply("**لیست مدیران ربات خالی است!**")
+        return
+    
+    message = "**لیست مدیران ربات**\n\n"
+    
+    for i, user_id in enumerate(bot_admins[chat_id], 1):
+        user_mention = await get_user_mention(user_id)
+        message += f"**{i} -** {user_mention}\n"
+    
+    await event.reply(message)
+
+@client.on(events.NewMessage(pattern='^پاکسازی لیست مدیران$'))
+async def clear_bot_admins(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    bot_admins[chat_id] = []
+    await event.reply("**لیست مدیران ربات با موفقیت پاکسازی شد!**")
+
+@client.on(events.NewMessage(pattern='^پاکسازی لیست ادمین$'))
+async def clear_group_admins(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    try:
+        admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+        
+        for admin in admins:
+            if admin.bot:
+                continue
+                
+            role = await is_target_owner_or_admin(chat_id, admin.id)
+            if role == "مالک گروه":
+                continue
+            
+            try:
+                await client(functions.channels.EditAdminRequest(
+                    channel=chat_id,
+                    user_id=admin.id,
+                    admin_rights=types.ChatAdminRights(
+                        change_info=False,
+                        post_messages=False,
+                        edit_messages=False,
+                        delete_messages=False,
+                        ban_users=False,
+                        invite_users=False,
+                        pin_messages=False,
+                        add_admins=False,
+                        anonymous=False,
+                        manage_call=False,
+                        other=False,
+                        manage_topics=False,
+                        post_stories=False,
+                        edit_stories=False,
+                        delete_stories=False
+                    ),
+                    rank=''
+                ))
+            except:
+                pass
+        
+        await event.reply("**لیست ادمین های گروه با موفقیت پاکسازی شد!**")
+        
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^تنظیم مالک$|^تنظیم مالک @|^تنظیم مالک \d+'))
+async def set_bot_owner(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    if chat_id not in bot_owners:
+        bot_owners[chat_id] = []
+    
+    if target_user in bot_owners[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مالک ربات است!**")
+        return
+    
+    bot_owners[chat_id].append(target_user)
+    user_mention = await get_user_mention(target_user)
+    await event.reply(f"**کاربر {user_mention} به لیست مالکین گروه اضافه شد!**")
+
+@client.on(events.NewMessage(pattern=r'^حذف مالک$|^حذف مالک @|^حذف مالک \d+'))
+async def remove_bot_owner(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    group_owner_id = await get_actual_group_owner(chat_id)
+    if group_owner_id and target_user == group_owner_id:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} سازنده اصلی گروه است و نمیتوان حذف کرد!**")
+        return
+    
+    if chat_id not in bot_owners or target_user not in bot_owners[chat_id]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر مالک ربات نیست!**")
+        return
+    
+    bot_owners[chat_id].remove(target_user)
+    user_mention = await get_user_mention(target_user)
+    await event.reply(f"**{user_mention} از لیست مالکین ربات حذف شد!**")
+
+@client.on(events.NewMessage(pattern='^لیست مالکین$'))
+async def list_bot_owners(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    try:
+        message = "**لیست مالکین گروه**\n\n"
+        
+        group_owner_id = await get_actual_group_owner(chat_id)
+        if group_owner_id:
+            group_owner_mention = await get_user_mention(group_owner_id)
+            message += f"**سازنده گروه :** {group_owner_mention}\n\n"
+        
+        if chat_id in bot_owners and bot_owners[chat_id]:
+            message += "**مالکین ربات :**\n"
+            for i, user_id in enumerate(bot_owners[chat_id], 1):
+                user_mention = await get_user_mention(user_id)
+                message += f"  **{i} -** {user_mention}\n"
+        else:
+            message += "**مالکین ربات :** هیچ مالکی وجود ندارد\n"
+        
+        await event.reply(message)
+        
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern='^پاکسازی لیست مالکین$'))
+async def clear_bot_owners(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id in bot_owners:
+        group_owner_id = await get_actual_group_owner(chat_id)
+        
+        if group_owner_id and group_owner_id in bot_owners[chat_id]:
+            bot_owners[chat_id] = [group_owner_id]
+        else:
+            bot_owners[chat_id] = []
+    
+    await event.reply("**لیست مالکین ربات با موفقیت پاکسازی شد!**")
+
+@client.on(events.NewMessage(pattern=r'^افزودن ادمین$|^افزودن ادمین @|^افزودن ادمین \d+'))
+async def add_group_admin(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role in ["مالک گروه", "ادمین گروه"]:
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} در حال حاضر {role} است!**")
+        return
+    
+    try:
+        await client(functions.channels.EditAdminRequest(
+            channel=chat_id,
+            user_id=target_user,
+            admin_rights=types.ChatAdminRights(
+                change_info=True,
+                post_messages=True,
+                edit_messages=True,
+                delete_messages=True,
+                ban_users=True,
+                invite_users=True,
+                pin_messages=True,
+                add_admins=True,
+                anonymous=True,
+                manage_call=True,
+                other=True,
+                manage_topics=False,
+                post_stories=True,
+                edit_stories=True,
+                delete_stories=True
+            ),
+            rank=''
+        ))
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} به لیست ادمین اضافه شد!**")
+        
+    except Exception as e:
+        await event.reply(f"**خطا در افزودن ادمین!**")
+
+@client.on(events.NewMessage(pattern=r'^حذف ادمین$|^حذف ادمین @|^حذف ادمین \d+'))
+async def remove_group_admin(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    target_user = await get_target_user(event)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role == "مالک گروه":
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} مالک گروه است و نمیتوان حذف کرد!**")
+        return
+    
+    if role != "ادمین گروه":
+        return
+    
+    try:
+        await client(functions.channels.EditAdminRequest(
+            channel=chat_id,
+            user_id=target_user,
+            admin_rights=types.ChatAdminRights(
+                change_info=False,
+                post_messages=False,
+                edit_messages=False,
+                delete_messages=False,
+                ban_users=False,
+                invite_users=False,
+                pin_messages=False,
+                add_admins=False,
+                anonymous=False,
+                manage_call=False,
+                other=False,
+                manage_topics=False,
+                post_stories=False,
+                edit_stories=False,
+                delete_stories=False
+            ),
+            rank=''
+        ))
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} از لیست ادمین ها حذف شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} کاربر {target_name} را از ادمینی گروه حذف کرد!**"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern='^لیست ادمین$'))
+async def list_group_admins(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    try:
+        admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+        
+        if not admins:
+            await event.reply("**لیست ادمین ها خالی است!**")
+            return
+        
+        message = "**لیست ادمین های گروه**\n\n"
+        
+        for i, admin in enumerate(admins, 1):
+            if not admin.bot:
+                user_mention = await get_user_mention(admin.id)
+                role = await is_target_owner_or_admin(chat_id, admin.id)
+                title = admin_titles.get((chat_id, admin.id), 'بدون عنوان')
+                message += f"**{i} -** {user_mention} ({role}) - عنوان: {title}\n"
+        
+        await event.reply(message)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^تنظیم عنوان (.*)$'))
+async def set_admin_title(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    text = event.text
+    
+    parts = text.split(maxsplit=2)
+    if len(parts) < 3:
+        return
+    
+    identifier = parts[1].strip()
+    title = parts[2].strip()
+    
+    target_user = await resolve_user_identifier(identifier, chat_id)
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role != "ادمین گروه" and role != "مالک گروه":
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} ادمین گروه نیست!**")
+        return
+    
+    try:
+        old_title = admin_titles.get((chat_id, target_user), 'بدون عنوان')
+        admin_titles[(chat_id, target_user)] = title
+        
+        await client.edit_admin(
+            chat_id,
+            target_user,
+            change_info=False,
+            delete_messages=False,
+            ban_users=False,
+            invite_users=False,
+            pin_messages=False,
+            add_admins=False,
+            anonymous=False,
+            manage_call=False,
+            post_messages=False,
+            rank=title
+        )
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**تایتل ادمینی {user_mention} به \"{title}\" تنظیم شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} تایتل ادمینی {target_name} را تغییر داد!**\n\n"
+            report_text += f"**تایتل قبلی**\n`{old_title}`\n\n"
+            report_text += f"**تایتل جدید**\n`{title}`"
+            await send_admin_report(chat_id, report_text)
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern=r'^حذف عنوان$|^حذف عنوان @|^حذف عنوان \d+'))
+async def remove_admin_title(event):
+    if not await is_bot_owner(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    reply_msg = await event.get_reply_message()
+    if reply_msg:
+        target_user = reply_msg.sender_id
+    else:
+        parts = event.text.split(maxsplit=2)
+        if len(parts) > 1:
+            identifier = parts[1].strip()
+            target_user = await resolve_user_identifier(identifier, chat_id)
+        else:
+            return
+    
+    if not target_user:
+        return
+    
+    role = await is_target_owner_or_admin(chat_id, target_user)
+    if role != "ادمین گروه" and role != "مالک گروه":
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**{user_mention} ادمین گروه نیست!**")
+        return
+    
+    try:
+        old_title = admin_titles.get((chat_id, target_user), 'بدون عنوان')
+        
+        if (chat_id, target_user) in admin_titles:
+            del admin_titles[(chat_id, target_user)]
+        
+        await client.edit_admin(
+            chat_id,
+            target_user,
+            change_info=False,
+            delete_messages=False,
+            ban_users=False,
+            invite_users=False,
+            pin_messages=False,
+            add_admins=False,
+            anonymous=False,
+            manage_call=False,
+            post_messages=False,
+            rank=''
+        )
+        
+        user_mention = await get_user_mention(target_user)
+        await event.reply(f"**عنوان ادمینی {user_mention} حذف شد!**")
+        
+        if chat_id in admin_reports and admin_reports[chat_id]:
+            admin_name = await get_user_name(event.sender_id)
+            target_name = await get_user_name(target_user)
+            report_text = f"**{admin_name} تایتل ادمینی {target_name} را حذف کرد!**\n\n"
+            report_text += f"**تایتل قبلی**\n`{old_title}`\n\n"
+            report_text += f"**تایتل جدید**\n`بدون عنوان`"
+            await send_admin_report(chat_id, report_text)
+        
+        try:
+            await event.delete()
+            await client.delete_messages(chat_id, event.id)
+        except:
+            pass
+        
+    except:
+        pass
+
+@client.on(events.NewMessage(pattern='^تنظیم پاسخ$'))
+async def set_auto_reply(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    sender_id = event.sender_id
+    
+    user_states[(chat_id, sender_id)] = {'state': 'waiting_for_trigger'}
+    await event.reply("**ابتدا چیزی که میخواهید ربات بهش پاسخ دهد را ارسال کنید**\n\nبرای لغو، کلمه \"لغو\" را ارسال کنید.")
+
+@client.on(events.NewMessage)
+async def handle_all_messages(event):
+    if not event.is_group:
+        return
+    
+    chat_id = event.chat_id
+    sender_id = event.sender_id
+    
+    if event.sender_id == (await client.get_me()).id:
+        return
+    
+    state_key = (chat_id, sender_id)
+    
+    if state_key in user_states:
+        state_data = user_states[state_key]
+        
+        if state_data['state'] == 'waiting_for_trigger':
+            if event.text and event.text.strip() == 'لغو':
+                del user_states[state_key]
+                await event.reply("**عملیات تنظیم پاسخ لغو شد!**")
+                return
+            
+            if event.text and event.text.strip() == 'تنظیم پاسخ':
+                await event.reply("**لطفا متنی غیر از \"تنظیم پاسخ\" را ارسال کنید!**")
+                return
+            
+            user_states[state_key] = {
+                'state': 'waiting_for_response',
+                'trigger': event.message
+            }
+            
+            trigger_text = event.text[:30] + "..." if event.text and len(event.text) > 30 else (event.text if event.text else "این پیام")
+            await event.reply(f"**حالا چیزی که میخواهید وقتی کسی \"{trigger_text}\" رو گفت پاسخ دهد را ارسال کنید**\n\nبرای لغو، کلمه \"لغو\" را ارسال کنید.")
+            return
+        
+        elif state_data['state'] == 'waiting_for_response':
+            if event.text and event.text.strip() == 'لغو':
+                del user_states[state_key]
+                await event.reply("**عملیات تنظیم پاسخ لغو شد!**")
+                return
+            
+            trigger_content = state_data['trigger']
+            response_content = event.message
+            user_states[state_key] = {
+                'state': 'waiting_for_access_level',
+                'trigger': trigger_content,
+                'response': response_content
+            }
+            
+            buttons = [
+                [Button.inline("مالک گروه", "owner_only")],
+                [Button.inline("ادمین گروه", "admins_only")],
+                [Button.inline("همه", "everyone")],
+                [Button.inline("لغو", "cancel_auto_reply")]
+            ]
+            
+            trigger_text = trigger_content.text[:30] + "..." if trigger_content.text and len(trigger_content.text) > 30 else (trigger_content.text if trigger_content.text else "رسانه")
+            
+            await event.reply(
+                f"**لطفا از پنل زیر سطح دسترسی را برای پاسخ به \"{trigger_text}\" انتخاب کنید:**",
+                buttons=buttons
+            )
+            return
+    
+    if event.text and event.text.strip() == 'پینگ':
+        msg = await event.reply("**درحال پینگ گرفتن، لطفا صبرکنید**")
+        start_time = time.time()
+        try:
+            await msg.edit("**درحال محاسبه پینگ...**")
+        except:
+            pass
+        end_time = time.time()
+        
+        ping_time = (end_time - start_time) * 1000
+        
+        if ping_time < 100:
+            status = "عالی"
+        elif ping_time < 300:
+            status = "خوب"
+        else:
+            status = "بد"
+        
+        await msg.edit(f"**ضدلینک امیرولف آنلاین میباشد!**\n**پینگ :** `{ping_time:.0f}ms`\n**وضعیت ربات :** `{status}`")
+        return
+    
+    if event.text and event.text.strip() == 'پیکربندی':
+        if not await is_bot_owner(event):
+            return
+        
+        buttons = [
+            [Button.inline("تنظیم مجدد ادمین گروه", "reset_admins")],
+            [Button.inline("بروزرسانی ادمینای گروه", "update_group_admins")],
+            [Button.inline("حذف لیست مدیران ربات", "clear_bot_admins_list")],
+            [Button.inline("رفرش ربات", "refresh_bot")],
+            [Button.inline("تایید", "confirm_config"), Button.inline("لغو", "cancel_config")]
+        ]
+        await event.reply("**ربات مجددا بروز شد!**\n\nلطفا از منو زیر انتخاب کنید", buttons=buttons)
+        return
+    
+    if event.text and event.text.strip() == 'گزارش وضعیت فعال':
+        if not await is_bot_owner(event):
+            return
+        
+        admin_reports[chat_id] = True
+        await event.reply("**گزارش وضعیت ادمین های گروه با موفقیت فعال شد!**")
+        return
+    
+    if event.text and event.text.strip() == 'گزارش وضعیت غیرفعال':
+        if not await is_bot_owner(event):
+            return
+        
+        admin_reports[chat_id] = False
+        await event.reply("**گزارش وضعیت ادمین های گروه غیرفعال شد!**")
+        return
+    
+    if chat_id in auto_replies:
+        for reply in auto_replies[chat_id]:
+            trigger = reply['trigger']
+            response = reply['response']
+            access_level = reply['access_level']
+            
+            if trigger.text and event.text and trigger.text.strip() == event.text.strip():
+                should_reply = False
+                
+                if access_level == 'owner_only':
+                    if await is_bot_owner(event):
+                        should_reply = True
+                    elif sender_id == 565605634:
+                        should_reply = True
+                
+                elif access_level == 'admins_only':
+                    if await is_owner_or_admin(event):
+                        should_reply = True
+                
+                elif access_level == 'everyone':
+                    should_reply = True
+                
+                if should_reply:
+                    try:
+                        if response.media:
+                            await client.send_file(chat_id, response.media, caption=response.text)
+                        else:
+                            await client.send_message(chat_id, response.text)
+                    except:
+                        pass
+    
+    if chat_id in group_lock_status and group_lock_status[chat_id]:
+        if not await should_delete_message(event):
+            return
+        
+        try:
+            await client.delete_messages(event.chat_id, event.id)
+            
+            sender_mention = await get_user_mention(event.sender_id)
+            
+            if chat_id in group_lock_end_time:
+                now = time.time()
+                end_time = group_lock_end_time[chat_id]
+                if end_time > now:
+                    remaining_seconds = int(end_time - now)
+                    remaining_time = format_time(remaining_seconds)
+                    warning_msg = await client.send_message(
+                        event.chat_id,
+                        f"{sender_mention}\n\n**قفل گروه در حال حاضر فعال است**\n\n**زمان باقی مانده تا پایان قفل** ({remaining_time})"
+                    )
+                    await asyncio.sleep(5)
+                    try:
+                        await client.delete_messages(event.chat_id, warning_msg.id)
+                    except:
+                        pass
+                else:
+                    warning_msg = await client.send_message(
+                        event.chat_id,
+                        f"{sender_mention}\n\n**قفل گروه در حال حاضر فعال است!**"
+                    )
+                    await asyncio.sleep(5)
+                    try:
+                        await client.delete_messages(event.chat_id, warning_msg.id)
+                    except:
+                        pass
+            else:
+                warning_msg = await client.send_message(
+                    event.chat_id,
+                    f"{sender_mention}\n\n**قفل گروه در حال حاضر فعال است!**"
+                )
+                await asyncio.sleep(5)
+                try:
+                    await client.delete_messages(event.chat_id, warning_msg.id)
+                except:
+                    pass
+            
+        except:
+            pass
+
+@client.on(events.CallbackQuery(pattern=r'owner_only|admins_only|everyone|cancel_auto_reply'))
+async def handle_auto_reply_callback(event):
+    data = event.data.decode('utf-8')
+    chat_id = event.chat_id
+    user_id = event.sender_id
+    
+    state_key = (chat_id, user_id)
+    
+    if state_key in user_states and user_states[state_key]['state'] == 'waiting_for_access_level':
+        if data == 'cancel_auto_reply':
+            await event.edit("**عملیات لغو شد!**")
+            del user_states[state_key]
+            return
+        
+        state_data = user_states[state_key]
+        
+        if data == 'owner_only':
+            access_text = 'مالک گروه'
+        elif data == 'admins_only':
+            access_text = 'ادمین گروه'
+        else:
+            access_text = 'همه'
+        
+        trigger_content = state_data['trigger']
+        response_content = state_data['response']
+        
+        if chat_id not in auto_replies:
+            auto_replies[chat_id] = []
+        
+        auto_replies[chat_id].append({
+            'trigger': trigger_content,
+            'response': response_content,
+            'access_level': data
+        })
+        
+        trigger_text = trigger_content.text[:30] + "..." if trigger_content.text and len(trigger_content.text) > 30 else (trigger_content.text if trigger_content.text else "رسانه")
+        response_text = response_content.text[:30] + "..." if response_content.text and len(response_content.text) > 30 else (response_content.text if response_content.text else "رسانه")
+        
+        await event.edit(f"**پیام \"{response_text}\" در پاسخ به \"{trigger_text}\" تنظیم شد!**\n\n**سطح دسترسی برای پیام :** `{access_text}`")
+        del user_states[state_key]
+
+@client.on(events.CallbackQuery(pattern=r'reset_admins|update_group_admins|clear_bot_admins_list|refresh_bot|confirm_config|cancel_config'))
+async def handle_config_callback(event):
+    data = event.data.decode('utf-8')
+    chat_id = event.chat_id
+    
+    if data == "reset_admins":
+        try:
+            admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+            await event.answer(f"تعداد {len(admins)} ادمین شناسایی شدند")
+        except:
+            await event.answer()
+    
+    elif data == "update_group_admins":
+        try:
+            admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+            count = 0
+            
+            if chat_id not in bot_admins:
+                bot_admins[chat_id] = []
+            
+            for admin in admins:
+                if admin.bot:
+                    continue
+                
+                if admin.id not in bot_admins[chat_id]:
+                    bot_admins[chat_id].append(admin.id)
+                    count += 1
+            
+            await event.answer(f"تعداد {count} ادمین به لیست مدیران ربات اضافه شدند")
+            
+            if chat_id in admin_reports and admin_reports[chat_id]:
+                report_text = f"**بروزرسانی ادمینای گروه انجام شد! تعداد {count} ادمین اضافه شدند.**"
+                await send_admin_report(chat_id, report_text)
+        
+        except:
+            await event.answer()
+    
+    elif data == "clear_bot_admins_list":
+        if chat_id in bot_admins:
+            bot_admins[chat_id] = []
+            await event.answer("لیست مدیران ربات پاکسازی شد")
+        else:
+            await event.answer("لیست مدیران ربات خالی است")
+    
+    elif data == "refresh_bot":
+        await event.edit("**ربات در حال رفرش میباشد، این عملیات 10 ثانیه طول میکشد**")
+        await asyncio.sleep(10)
+        
+        try:
+            admins = await client.get_participants(chat_id, filter=types.ChannelParticipantsAdmins)
+            real_owner_count = 0
+            for admin in admins:
+                try:
+                    participant = await client.get_permissions(chat_id, admin.id)
+                    if participant.is_creator:
+                        real_owner_count += 1
+                except:
+                    continue
+            
+            admin_count = len([a for a in admins if not a.bot])
+        except:
+            admin_count = 0
+            real_owner_count = 0
+        
+        bot_admin_count = len(bot_admins.get(chat_id, []))
+        
+        await event.edit(f"**ربات با موفقیت رفرش شد!**\n**تعداد ادمین های گروه :** `{admin_count}`\n**تعداد مالک واقعی گروه :** `{real_owner_count}`\n**تعداد مدیران ربات :** `{bot_admin_count}`")
+    
+    elif data == "confirm_config":
+        await event.edit("**تنظیمات تایید شد!**")
+    
+    elif data == "cancel_config":
+        await event.edit("**عملیات لغو شد!**")
+
+@client.on(events.NewMessage(pattern='^لیست پاسخ$'))
+async def list_auto_replies(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id not in auto_replies or not auto_replies[chat_id]:
+        await event.reply("**لیست پاسخ‌های خودکار خالی است!**")
+        return
+    
+    message = "**لیست پاسخ‌های خودکار**\n\n"
+    
+    for i, reply in enumerate(auto_replies[chat_id], 1):
+        trigger = reply['trigger']
+        response = reply['response']
+        access_level = reply['access_level']
+        
+        trigger_text = trigger.text[:20] + "..." if trigger.text and len(trigger.text) > 20 else (trigger.text if trigger.text else "رسانه")
+        response_text = response.text[:20] + "..." if response.text and len(response.text) > 20 else (response.text if response.text else "رسانه")
+        
+        if access_level == 'owner_only':
+            access_text = 'مالک گروه'
+        elif access_level == 'admins_only':
+            access_text = 'ادمین گروه'
+        else:
+            access_text = 'همه'
+        
+        message += f"**{i} -** پاسخ به \"{trigger_text}\" با \"{response_text}\" (سطح: `{access_text}`)\n"
+    
+    await event.reply(message)
+
+@client.on(events.NewMessage(pattern='^حذف پاسخ$'))
+async def delete_auto_reply(event):
+    if not await is_owner_or_admin(event):
+        return
+    
+    chat_id = event.chat_id
+    
+    if chat_id not in auto_replies or not auto_replies[chat_id]:
+        await event.reply("**لیست پاسخ‌های خودکار خالی است!**")
+        return
+    
+    if event.reply_to_msg_id:
+        reply_msg = await event.get_reply_message()
+        if reply_msg and reply_msg.text:
+            trigger_text = reply_msg.text.strip()
+            
+            for i, reply in enumerate(auto_replies[chat_id]):
+                if reply['trigger'].text and reply['trigger'].text.strip() == trigger_text:
+                    del auto_replies[chat_id][i]
+                    await event.reply(f"**پاسخ خودکار برای \"{trigger_text[:30]}\" حذف شد!**")
+                    return
+        
+        await event.reply("**پاسخ خودکار با این متن یافت نشد!**")
+    else:
+        await event.reply("**لطفا روی پیامی که میخواهید پاسخ آن حذف شود ریپلای کنید!**")
+
+async def main():
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    client.loop.run_until_complete(main())
